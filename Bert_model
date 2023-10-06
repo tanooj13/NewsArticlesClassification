@@ -1,0 +1,124 @@
+import torch
+from transformers import BertTokenizer, BertForSequenceClassification
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import LabelEncoder
+
+def train_and_classify_with_bert(input_dataset, input_labels):
+    # Encode labels using LabelEncoder
+    label_encoder = LabelEncoder()
+    encoded_labels = label_encoder.fit_transform(input_labels)
+
+    # Load pre-trained BERT model and tokenizer
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=len(label_encoder.classes_))
+
+    # Tokenize and preprocess the data
+    input_ids = []
+    attention_masks = []
+
+    for article in input_dataset:
+        encoded_dict = tokenizer.encode_plus(
+            article,
+            add_special_tokens=True,
+            max_length=128,  # Adjust as needed
+            pad_to_max_length=True,
+            return_attention_mask=True,
+            return_tensors='pt'
+        )
+
+        input_ids.append(encoded_dict['input_ids'])
+        attention_masks.append(encoded_dict['attention_mask'])
+
+    input_ids = torch.cat(input_ids, dim=0)
+    attention_masks = torch.cat(attention_masks, dim=0)
+    labels = torch.tensor(encoded_labels)
+
+    # Split data into training and validation sets
+    train_inputs, val_inputs, train_masks, val_masks, train_labels, val_labels = train_test_split(
+        input_ids, attention_masks, labels, random_state=42, test_size=0.2
+    )
+
+    # Create DataLoader for training and validation data
+    batch_size = 32
+    train_data = TensorDataset(train_inputs, train_masks, train_labels)
+    train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_data = TensorDataset(val_inputs, val_masks, val_labels)
+    val_dataloader = DataLoader(val_data, batch_size=batch_size)
+
+    # Training loop
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)  # Adjust learning rate as needed
+
+    num_epochs = 3  # Adjust as needed
+
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        for batch in train_dataloader:
+            batch = tuple(t.to(device) for t in batch)
+            input_ids, attention_mask, label_ids = batch
+            optimizer.zero_grad()
+            outputs = model(input_ids, attention_mask=attention_mask, labels=label_ids)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        avg_train_loss = total_loss / len(train_dataloader)
+
+        # Validation
+        model.eval()
+        val_preds = []
+        val_true = []
+        for batch in val_dataloader:
+            batch = tuple(t.to(device) for t in batch)
+            input_ids, attention_mask, label_ids = batch
+            with torch.no_grad():
+                outputs = model(input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            val_preds.extend(logits.argmax(dim=1).tolist())
+            val_true.extend(label_ids.tolist())
+
+        val_accuracy = accuracy_score(val_true, val_preds)
+        print(f'Epoch {epoch + 1}/{num_epochs}, Training Loss: {avg_train_loss}, Validation Accuracy: {val_accuracy}')
+
+    # Inference
+    def classify_article(article_text):
+        encoded_dict = tokenizer.encode_plus(
+            article_text,
+            add_special_tokens=True,
+            max_length=128,
+            pad_to_max_length=True,
+            return_attention_mask=True,
+            return_tensors='pt'
+        )
+        input_ids = encoded_dict['input_ids'].to(device)
+        attention_mask = encoded_dict['attention_mask'].to(device)
+        with torch.no_grad():
+            outputs = model(input_ids, attention_mask=attention_mask)
+        logits = outputs.logits
+        predicted_class = logits.argmax().item()
+        predicted_label = label_encoder.inverse_transform([predicted_class])[0]
+        return predicted_label
+
+    # Example inference
+    article_to_classify = "i love reading robin sharma books"
+    predicted_category = classify_article(article_to_classify)
+    print(f"Predicted Category: {predicted_category}")
+
+# Sample Data
+sample_articles = [
+    "The sun is shining brightly today.",
+    "I just finished reading a great book.",
+    "This is a sample sentence for testing.",
+    "I love hiking in the mountains.",
+    "The latest smartphone has amazing features.",
+]
+
+# Corresponding Labels
+sample_labels = ["Weather", "Books", "Testing", "Hobbies", "Technology"]
+
+# Call the function with the sample dataset and labels
+train_and_classify_with_bert(sample_articles, sample_labels)
